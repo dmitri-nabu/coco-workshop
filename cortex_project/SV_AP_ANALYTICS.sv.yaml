@@ -1,0 +1,290 @@
+name: SV_AP_ANALYTICS
+description: >-
+  Accounts payable (AP) invoice analytics across four ERPs (SAP, Oracle, Baan, Workday), built on the curated
+  Silver table COCO_WORKSHOP.PIPELINE_LAB.SILVER_AP_INVOICES. Grain: one row per source invoice (INVOICE_KEY).
+  Amounts are in the original transaction currency (no FX conversion). The data has no payment/paid status.
+tables:
+  - name: AP_INVOICES
+    description: >-
+      Current-state AP invoices, one row per source-system invoice. INVOICE_KEY = '<SOURCE_SYSTEM>|<SOURCE_INVOICE_ID>'
+      is unique. Amounts are in CURRENCY_CODE and must not be summed across currencies.
+    base_table:
+      database: COCO_WORKSHOP
+      schema: PIPELINE_LAB
+      table: SILVER_AP_INVOICES
+    primary_key:
+      columns:
+        - INVOICE_KEY
+    dimensions:
+      - name: INVOICE_KEY
+        expr: INVOICE_KEY
+        data_type: VARCHAR
+        description: Unique invoice identifier across all ERPs, formatted '<SOURCE_SYSTEM>|<SOURCE_INVOICE_ID>'. Use it to count invoices.
+        unique: true
+      - name: BUSINESS_UNIT
+        expr: SOURCE_SYSTEM
+        data_type: VARCHAR
+        description: >-
+          Business unit, represented by the ERP the invoice comes from: SAP, ORACLE, BAAN (EMEA manufacturing, Netherlands + UK),
+          WORKDAY (Americas corporate services, plus a London entity). The data has no separate business-unit field.
+        synonyms: [BU, source system, ERP, system, division]
+        sample_values: [SAP, ORACLE, BAAN, WORKDAY]
+        is_enum: true
+      - name: SOURCE_INVOICE_ID
+        expr: SOURCE_INVOICE_ID
+        data_type: VARCHAR
+        description: Invoice ID as stored in the source ERP. Unique only within one business unit.
+      - name: INVOICE_NUMBER
+        expr: INVOICE_NUMBER
+        data_type: VARCHAR
+        description: Business-facing invoice number printed on the invoice. Unique only within one business unit.
+        synonyms: [invoice no, "invoice #", invoice reference]
+      - name: VENDOR_ID
+        expr: VENDOR_ID
+        data_type: VARCHAR
+        description: >-
+          Vendor identifier from the source ERP (formats like BV-NNN for Baan, WS-NNN for Workday). Identifiers are not
+          harmonized: the same real-world vendor can have different IDs in different ERPs.
+        synonyms: [supplier id, payee id]
+      - name: VENDOR_NAME
+        expr: VENDOR_NAME
+        data_type: VARCHAR
+        description: Vendor (supplier) name as provided by the source ERP. Use it to display and group vendors.
+        synonyms: [vendor, supplier, supplier name, payee]
+        sample_values: [TechServ Solutions, Deutsche Industrie Werke, Nordic Metals AB, London Legal Partners LLP, Acme Industrial Supply, Rotterdam Port Services, Global Parts GmbH]
+      - name: CURRENCY_CODE
+        expr: CURRENCY_CODE
+        data_type: VARCHAR
+        description: ISO 4217 transaction currency of the invoice amount. Always group amounts by this column.
+        synonyms: [currency]
+        sample_values: [USD, EUR, GBP]
+        is_enum: true
+      - name: APPROVAL_STATUS
+        expr: APPROVAL_STATUS
+        data_type: VARCHAR
+        description: Normalized approval status across ERPs, APPROVED or PENDING (pending = awaiting approval / in review).
+        synonyms: [status, invoice status, approval state]
+        sample_values: [APPROVED, PENDING]
+        is_enum: true
+      - name: PAYMENT_TERMS
+        expr: PAYMENT_TERMS
+        data_type: VARCHAR
+        description: Normalized payment terms (NET30, NET60).
+        synonyms: [terms]
+        sample_values: [NET30, NET60]
+        is_enum: true
+      - name: PAYMENT_TERMS_DAYS
+        expr: PAYMENT_TERMS_DAYS
+        data_type: NUMBER
+        description: Number of days in the payment terms (30 or 60).
+      - name: PO_NUMBER
+        expr: PO_NUMBER
+        data_type: VARCHAR
+        description: Purchase order number. NULL means a non-PO invoice (for example a service invoice).
+        synonyms: [purchase order, PO]
+      - name: INVOICE_DESCRIPTION
+        expr: DESCRIPTION
+        data_type: VARCHAR
+        description: Free-text invoice line description or memo. May be in Dutch for Baan invoices.
+        synonyms: [memo, line description]
+      - name: GL_ACCOUNT
+        expr: GL_ACCOUNT_RAW
+        data_type: VARCHAR
+        description: General ledger account code as stored in the source ERP. Not comparable across business units.
+        synonyms: [GL, ledger account, GL code]
+      - name: COST_CENTER
+        expr: COST_CENTER_RAW
+        data_type: VARCHAR
+        description: Cost center code as stored in the source ERP. Not comparable across business units. Baan codes use both BC-XX (before Jan 2025) and BC-XXX formats.
+        synonyms: [cost centre, department, dept]
+    time_dimensions:
+      - name: INVOICE_DATE
+        expr: INVOICE_DATE
+        data_type: DATE
+        description: Date the invoice was issued. This is the default date for spend, volume and trend questions.
+        synonyms: [date, billing date, issue date]
+      - name: INVOICE_MONTH
+        expr: DATE_TRUNC('MONTH', INVOICE_DATE)
+        data_type: DATE
+        description: First day of the invoice month. Use it for monthly trends.
+        synonyms: [month]
+      - name: INVOICE_QUARTER
+        expr: DATE_TRUNC('QUARTER', INVOICE_DATE)
+        data_type: DATE
+        description: First day of the invoice calendar quarter. Use it for quarterly trends.
+        synonyms: [quarter]
+      - name: INVOICE_YEAR
+        expr: YEAR(INVOICE_DATE)
+        data_type: NUMBER
+        description: Calendar year of the invoice date. "This year" means the year of the latest INVOICE_DATE in the data.
+        synonyms: [year]
+      - name: DUE_DATE
+        expr: DUE_DATE
+        data_type: DATE
+        description: Date payment is due. Use it for due, upcoming and past-due questions.
+        synonyms: [payment due date, due]
+      - name: DUE_MONTH
+        expr: DATE_TRUNC('MONTH', DUE_DATE)
+        data_type: DATE
+        description: First day of the month in which payment is due. Use it for due-date bucketing.
+        synonyms: [due month]
+    facts:
+      - name: INVOICE_AMOUNT
+        expr: INVOICE_AMOUNT
+        data_type: NUMBER
+        description: Invoice amount in the original transaction currency (CURRENCY_CODE). Credit memos are negative.
+        synonyms: [amount, invoice value]
+    filters:
+      - name: PENDING_APPROVAL
+        expr: APPROVAL_STATUS = 'PENDING'
+        description: Invoices still awaiting approval.
+        synonyms: [awaiting approval, in review]
+      - name: PO_BACKED
+        expr: PO_NUMBER IS NOT NULL
+        description: Invoices linked to a purchase order.
+      - name: PAST_DUE
+        expr: DUE_DATE < (SELECT MAX(INVOICE_DATE) FROM COCO_WORKSHOP.PIPELINE_LAB.SILVER_AP_INVOICES)
+        description: >-
+          Invoices whose due date is before the latest invoice date in the data (the snapshot reference date). Combine
+          with PENDING_APPROVAL for overdue-and-unapproved invoices. Past due does not mean unpaid: there is no payment status.
+        synonyms: [overdue, past due, late]
+    metrics:
+      - name: TOTAL_AP_SPEND
+        expr: SUM(INVOICE_AMOUNT)
+        description: Total invoiced AP amount in original currency. Must be grouped by CURRENCY_CODE.
+        synonyms: [AP spend, spend, total spend, total invoice amount, total AP]
+      - name: SPEND_USD
+        expr: SUM(CASE WHEN CURRENCY_CODE = 'USD' THEN INVOICE_AMOUNT END)
+        description: Total AP spend on USD-denominated invoices only, in USD. Not a converted total.
+        synonyms: [USD spend, dollar invoices]
+      - name: SPEND_EUR
+        expr: SUM(CASE WHEN CURRENCY_CODE = 'EUR' THEN INVOICE_AMOUNT END)
+        description: Total AP spend on EUR-denominated invoices only, in EUR. Not a converted total.
+        synonyms: [EUR spend, euro invoices]
+      - name: SPEND_GBP
+        expr: SUM(CASE WHEN CURRENCY_CODE = 'GBP' THEN INVOICE_AMOUNT END)
+        description: Total AP spend on GBP-denominated invoices only, in GBP. Not a converted total.
+        synonyms: [GBP spend, sterling invoices]
+      - name: INVOICE_COUNT
+        expr: COUNT(DISTINCT INVOICE_KEY)
+        description: Number of distinct invoices.
+        synonyms: [number of invoices, invoice volume, count of invoices]
+      - name: AVG_INVOICE_AMOUNT
+        expr: AVG(INVOICE_AMOUNT)
+        description: Average invoice amount in original currency. Must be grouped by CURRENCY_CODE.
+        synonyms: [average invoice value]
+      - name: VENDOR_COUNT
+        expr: COUNT(DISTINCT VENDOR_ID)
+        description: Number of distinct vendor IDs. IDs are not harmonized across business units.
+        synonyms: [number of vendors, supplier count]
+      - name: PENDING_APPROVAL_AMOUNT
+        expr: SUM(CASE WHEN APPROVAL_STATUS = 'PENDING' THEN INVOICE_AMOUNT END)
+        description: >-
+          Amount of invoices still pending approval, in original currency. This is the closest available proxy for
+          "unpaid" amounts, because the data has no payment status. Must be grouped by CURRENCY_CODE.
+        synonyms: [unpaid amount, outstanding amount, open amount, pending amount, unapproved amount]
+      - name: PENDING_APPROVAL_COUNT
+        expr: COUNT(DISTINCT CASE WHEN APPROVAL_STATUS = 'PENDING' THEN INVOICE_KEY END)
+        description: Number of invoices pending approval.
+        synonyms: [unpaid invoices, pending invoices, open invoices]
+module_custom_instructions:
+  sql_generation: >-
+    Never sum, average or rank INVOICE_AMOUNT across different currencies: always include CURRENCY_CODE in the SELECT
+    and GROUP BY when returning amounts, and for top-N or rankings use QUALIFY ROW_NUMBER() OVER (PARTITION BY
+    CURRENCY_CODE ...). The data is a static snapshot: for relative periods (this year, last quarter, last 12 months,
+    overdue) anchor on (SELECT MAX(INVOICE_DATE) FROM the table), never CURRENT_DATE.
+  question_categorization: >-
+    If the user asks for payment status, paid dates, FX-converted or USD-equivalent totals, a unified chart of accounts,
+    or entity/tenant, explain that the curated AP data does not contain it.
+verified_queries:
+  - name: ap_spend_by_vendor_last_12_months
+    question: Total AP spend by vendor over the last 12 months
+    use_as_onboarding_question: true
+    sql: |
+      SELECT vendor_name, currency_code, SUM(invoice_amount) AS total_ap_spend
+      FROM __ap_invoices
+      WHERE invoice_date > DATEADD(MONTH, -12, (SELECT MAX(invoice_date) FROM __ap_invoices))
+      GROUP BY vendor_name, currency_code
+      ORDER BY currency_code, total_ap_spend DESC
+  - name: invoice_count_by_month_and_bu
+    question: Invoice count by month and business unit
+    use_as_onboarding_question: true
+    sql: |
+      SELECT invoice_month, business_unit, COUNT(DISTINCT invoice_key) AS invoice_count
+      FROM __ap_invoices
+      GROUP BY invoice_month, business_unit
+      ORDER BY invoice_month, business_unit
+  - name: top_10_vendors_unpaid_amount
+    question: Top 10 vendors by unpaid invoice amount
+    use_as_onboarding_question: true
+    sql: |
+      SELECT vendor_name, currency_code, SUM(invoice_amount) AS pending_approval_amount
+      FROM __ap_invoices
+      WHERE approval_status = 'PENDING'
+      GROUP BY vendor_name, currency_code
+      QUALIFY ROW_NUMBER() OVER (PARTITION BY currency_code ORDER BY pending_approval_amount DESC) <= 10
+      ORDER BY currency_code, pending_approval_amount DESC
+  - name: ap_spend_this_year_by_bu
+    question: What is total AP spend this year by business unit?
+    sql: |
+      SELECT business_unit, currency_code, SUM(invoice_amount) AS total_ap_spend
+      FROM __ap_invoices
+      WHERE YEAR(invoice_date) = YEAR((SELECT MAX(invoice_date) FROM __ap_invoices))
+      GROUP BY business_unit, currency_code
+      ORDER BY business_unit, currency_code
+  - name: invoice_count_last_quarter
+    question: How many invoices did we receive last quarter by business unit?
+    sql: |
+      SELECT business_unit, COUNT(DISTINCT invoice_key) AS invoice_count
+      FROM __ap_invoices
+      WHERE invoice_quarter = DATEADD(QUARTER, -1, DATE_TRUNC('QUARTER', (SELECT MAX(invoice_date) FROM __ap_invoices)))
+      GROUP BY business_unit
+      ORDER BY invoice_count DESC
+  - name: top_5_vendors_by_spend
+    question: Who are our top 5 vendors by spend?
+    sql: |
+      SELECT vendor_name, currency_code, SUM(invoice_amount) AS total_ap_spend
+      FROM __ap_invoices
+      GROUP BY vendor_name, currency_code
+      QUALIFY ROW_NUMBER() OVER (PARTITION BY currency_code ORDER BY total_ap_spend DESC) <= 5
+      ORDER BY currency_code, total_ap_spend DESC
+  - name: pending_amount_by_bu
+    question: How much is pending approval by business unit?
+    sql: |
+      SELECT business_unit, currency_code,
+        SUM(CASE WHEN approval_status = 'PENDING' THEN invoice_amount END) AS pending_approval_amount,
+        COUNT(DISTINCT CASE WHEN approval_status = 'PENDING' THEN invoice_key END) AS pending_approval_count
+      FROM __ap_invoices
+      GROUP BY business_unit, currency_code
+      ORDER BY business_unit, currency_code
+  - name: invoices_due_next_30_days
+    question: Which invoices are due in the next 30 days?
+    sql: |
+      SELECT invoice_number, business_unit, vendor_name, due_date, invoice_amount, currency_code, approval_status
+      FROM __ap_invoices
+      WHERE due_date >= (SELECT MAX(invoice_date) FROM __ap_invoices)
+        AND due_date < DATEADD(DAY, 30, (SELECT MAX(invoice_date) FROM __ap_invoices))
+      ORDER BY due_date
+  - name: overdue_pending_invoices
+    question: Which pending invoices are overdue?
+    sql: |
+      SELECT invoice_number, business_unit, vendor_name, due_date, invoice_amount, currency_code,
+        DATEDIFF(DAY, due_date, (SELECT MAX(invoice_date) FROM __ap_invoices)) AS days_past_due
+      FROM __ap_invoices
+      WHERE approval_status = 'PENDING'
+        AND due_date < (SELECT MAX(invoice_date) FROM __ap_invoices)
+      ORDER BY days_past_due DESC
+  - name: monthly_spend_trend
+    question: Show the monthly AP spend trend
+    sql: |
+      SELECT invoice_month, currency_code, SUM(invoice_amount) AS total_ap_spend
+      FROM __ap_invoices
+      GROUP BY invoice_month, currency_code
+      ORDER BY invoice_month, currency_code
+  - name: avg_invoice_by_payment_terms
+    question: What is the average invoice amount by payment terms?
+    sql: |
+      SELECT payment_terms, currency_code, AVG(invoice_amount) AS avg_invoice_amount, COUNT(DISTINCT invoice_key) AS invoice_count
+      FROM __ap_invoices
+      GROUP BY payment_terms, currency_code
+      ORDER BY payment_terms, currency_code
